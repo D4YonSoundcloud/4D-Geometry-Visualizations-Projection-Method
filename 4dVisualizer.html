@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>4D Visualization with dat.GUI</title>
+    <style>
+        body { margin: 0; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+<script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@v0.149.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@v0.149.0/examples/jsm/"
+      }
+    }
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    let scene, camera, renderer, controls, planes = [], clock;
+    let params = {
+        numPlanes: 5,
+        wSpread: 0.5,
+        wRotation: 0,
+        transparency: 0.5,
+        xInfluence: 0.33,
+        yInfluence: 0.33,
+        zInfluence: 0.33,
+        isAnimating: true,
+        backgroundColor: "#000000",
+        totalAnimationTime: 5.0
+    };
+
+    const vertexShader = `
+        uniform float wCoordinate;
+varying float vWCoordinate;
+varying vec2 vUv;
+
+void main() {
+    vWCoordinate = wCoordinate;
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+    `;
+
+    const fragmentShader = `
+        uniform float time;
+uniform float transparency;
+uniform float isAnimating;
+uniform vec3 backgroundColor;
+varying float vWCoordinate;
+varying vec2 vUv;
+
+vec2 rotate2D(vec2 p, float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+float drawLine(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+vec2 projectOrthographic(vec3 v) {
+    float scale = 0.5;
+    return vec2(v.x, v.y) * scale;
+}
+
+void main() {
+    vec2 st = vUv * 2.0 - 1.0;
+
+    float scale = 0.2;
+
+    vec3 vertices[8];
+    vertices[0] = vec3(-1.0, -1.0, -1.0) * scale;
+    vertices[1] = vec3( 1.0, -1.0, -1.0) * scale;
+    vertices[2] = vec3( 1.0,  1.0, -1.0) * scale;
+    vertices[3] = vec3(-1.0,  1.0, -1.0) * scale;
+    vertices[4] = vec3(-1.0, -1.0,  1.0) * scale;
+    vertices[5] = vec3( 1.0, -1.0,  1.0) * scale;
+    vertices[6] = vec3( 1.0,  1.0,  1.0) * scale;
+    vertices[7] = vec3(-1.0,  1.0,  1.0) * scale;
+
+    // Use the W-coordinate directly for phase offset
+    float angle = isAnimating * (time * 0.1 * 3.14159);
+
+    for (int i = 0; i < 8; i++) {
+        vertices[i].xy = rotate2D(vertices[i].xy, angle);
+        vertices[i].yz = rotate2D(vertices[i].yz, angle * 0.7);
+        vertices[i].zx = rotate2D(vertices[i].zx, angle * 0.5);
+    }
+
+    vec2 projectedVertices[8];
+    for (int i = 0; i < 8; i++) {
+        projectedVertices[i] = projectOrthographic(vertices[i]);
+    }
+
+    float d = 1.0;
+    float lineWidth = 0.005;
+
+    d = min(d, drawLine(st, projectedVertices[0], projectedVertices[1]));
+    d = min(d, drawLine(st, projectedVertices[1], projectedVertices[2]));
+    d = min(d, drawLine(st, projectedVertices[2], projectedVertices[3]));
+    d = min(d, drawLine(st, projectedVertices[3], projectedVertices[0]));
+
+    d = min(d, drawLine(st, projectedVertices[4], projectedVertices[5]));
+    d = min(d, drawLine(st, projectedVertices[5], projectedVertices[6]));
+    d = min(d, drawLine(st, projectedVertices[6], projectedVertices[7]));
+    d = min(d, drawLine(st, projectedVertices[7], projectedVertices[4]));
+
+    d = min(d, drawLine(st, projectedVertices[0], projectedVertices[4]));
+    d = min(d, drawLine(st, projectedVertices[1], projectedVertices[5]));
+    d = min(d, drawLine(st, projectedVertices[2], projectedVertices[6]));
+    d = min(d, drawLine(st, projectedVertices[3], projectedVertices[7]));
+
+    float alpha = (1.0 - step(lineWidth, d)) * transparency;
+    vec3 color = vec3(0.0, 1.0, 0.0);
+
+    gl_FragColor = vec4(mix(backgroundColor, color, alpha), transparency);
+}`;
+
+    function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 1000);
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        scene.background = new THREE.Color( 0x000000 );
+        // renderer.setClearColor(0x000000, 0);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.25;
+        controls.screenSpacePanning = false;
+        controls.maxPolarAngle = Math.PI / 2;
+
+        clock = new THREE.Clock();
+
+        createPlanes();
+
+        camera.position.set(3, 3, 3);
+        controls.update();
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+
+        window.addEventListener('resize', onWindowResize, false);
+
+        setupGUI();
+    }
+
+    function createPlanes() {
+        planes.forEach(plane => scene.remove(plane));
+        planes = [];
+
+        for (let i = 0; i < params.numPlanes; i++) {
+            const shaderMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 },
+                    wCoordinate: { value: 0 },
+                    transparency: { value: params.transparency },
+                    isAnimating: { value: params.isAnimating ? 1.0 : 0.0 },
+                    backgroundColor: { value: new THREE.Color(params.backgroundColor) }
+                },
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader,
+                side: THREE.DoubleSide,
+                transparent: true
+            });
+
+            const geometry = new THREE.PlaneGeometry(2, 2);
+            const plane = new THREE.Mesh(geometry, shaderMaterial);
+            scene.add(plane);
+            planes.push(plane);
+        }
+    }
+
+    function updatePlanePositions() {
+        planes.forEach((plane, index) => {
+            const w = (index / (params.numPlanes - 1) - 0.5) * params.wSpread;
+            const x = Math.cos(params.wRotation) * w * params.xInfluence;
+            const y = Math.sin(params.wRotation) * w * params.yInfluence;
+            const z = w * params.zInfluence;
+            plane.position.set(x, y, z);
+            plane.material.uniforms.wCoordinate.value = w;
+            plane.material.uniforms.transparency.value = params.transparency;
+            plane.material.uniforms.isAnimating.value = params.isAnimating ? 1.0 : 0.0;
+            plane.material.uniforms.backgroundColor.value.setStyle(params.backgroundColor);
+        });
+    }
+
+
+    function setupGUI() {
+        const gui = new dat.GUI();
+        gui.add(params, 'numPlanes', 1, 200, 1).onChange(createPlanes);
+        gui.add(params, 'wSpread', 0, 2, 0.01);
+
+        const wRotationFolder = gui.addFolder('W-Axis Rotation');
+        wRotationFolder.add(params, 'wRotation', 0, Math.PI * 2, 0.01).name('Angle');
+        wRotationFolder.add(params, 'xInfluence', 0, 10, 0.01).name('X Influence');
+        wRotationFolder.add(params, 'yInfluence', 0, 10, 0.01).name('Y Influence');
+        wRotationFolder.add(params, 'zInfluence', 0, 10, 0.01).name('Z Influence');
+
+        gui.add(params, 'transparency', 0, 1, 0.01);
+        gui.add(params, 'isAnimating');
+        gui.addColor(params, 'backgroundColor');
+    }
+
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        planes.forEach(plane => {
+            plane.material.uniforms.resolution.value.set(window.innerWidth, window.innerHeight);
+        });
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const elapsedTime = clock.getElapsedTime();
+        planes.forEach(plane => {
+            plane.material.uniforms.time.value = elapsedTime;
+        });
+        updatePlanePositions();
+        controls.update();
+        renderer.render(scene, camera);
+    }
+
+    init();
+    animate();
+</script>
+</body>
+</html>
